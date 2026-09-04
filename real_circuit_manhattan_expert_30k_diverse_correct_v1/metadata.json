@@ -1,0 +1,45 @@
+{
+  "dataset_type": "expert_mask_diffusion_dataset",
+  "task": "target_lightmap_to_mask_by_online_fft_training",
+  "target_resolution": 192,
+  "mask_resolution": 512,
+  "optics_schema": ["L0", "lamda", "distance", "inter_num"],
+  "optics_units": {"L0": "m", "lamda": "m", "distance": "m", "inter_num": "1"},
+  "forward_model": "linear_asf_reference_with_angular_spectrum_proxy",
+  "online_physics": {"enabled": true, "offline_expert_trajectory": false, "training_uses_fft": true},
+  "split": {"train": 24000, "val": 3000, "test": 3000},
+  "resolution_contract": {
+    "optimized_mask_resolution": 512,
+    "target_lightmap_resolution": 192,
+    "required_inter_num": 10,
+    "default_inter_num": 10,
+    "target_resolution_must_not_exceed_mask_times_inter": true
+  },
+  "variable_optics": false,
+  "expert_fields": ["target", "optics", "expert_mask", "expert_pred"],
+  "expert_optimizer": {
+    "generator_version": "multifidelity-linear-asf-v1",
+    "method": "continuous proxy Adam then hard Gumbel-Softmax candidate search with direct polish",
+    "objective": "maximize continuous-light NCC",
+    "acceptance": "fixed binary mask evaluated by final inter=10 finite-support linear ASF",
+    "proxy_inter_num": 6,
+    "reference_inter_num": 10,
+    "continuous_steps": 250,
+    "binary_steps": 250,
+    "candidate_count": 16,
+    "quality_attempts": 3,
+    "direct_polish_steps_on_failure": 200,
+    "minimum_ncc": 0.92,
+    "binary_dice_used_for_acceptance": false
+  },
+  "quality": {
+    "complete": true,
+    "samples": 30000,
+    "ncc_mean": 0.9422232429186503,
+    "ncc_min": 0.9203823804855347,
+    "minimum_required": 0.92,
+    "missing_shards": 0
+  },
+  "source_filter": "Manhattan diverse expert dataset",
+  "source_dataset_preserved": true
+}

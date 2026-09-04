@@ -1,0 +1,4 @@
+numpy
+scipy
+Pillow
+# PyTorch/ROCm is cluster-specific; install the version supported by the target machine.

@@ -1,0 +1,45 @@
+# Large data and model artifacts
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.npz
+*.npy
+*.h5
+*.hdf5
+checkpoints/
+runs/
+real_circuit_*/train/
+real_circuit_*/val/
+real_circuit_*/test/
+real_circuit_*/partials/
+real_circuit_*/logs/
+real_circuit_*/quality/
+
+# Local/runtime files
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+env/
+
+# Slurm output and local logs
+slurm-*.out
+slurm-*.err
+*.log
+
+# Credentials and private keys
+*.pem
+*.key
+*RsaKey*
+id_rsa
+id_rsa.pub
+authorized_keys
+
+# OS/editor files
+.DS_Store
+.idea/
+.vscode/
