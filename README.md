@@ -6,7 +6,7 @@
 
 仓库只保留当前有效的训练、网络、光学传播、数据读取和专家掩码优化代码。训练数据、模型 checkpoint、训练日志和集群临时文件不纳入 Git，因为它们体积很大且可能包含机器路径或实验隐私。
 
-当前代码中没有找到独立的 30K 数据集生成主程序；`expert_mask_quality_lab_20260829/direct_linear_gumbel_experiment.py` 是可复现的线性 ASF 专家掩码优化实验脚本。若要完整复现数据集生成，还需要另行提供数据生成主脚本及其输入数据说明。
+重要说明：当前仓库中没有实际批量生成 `real_circuit_manhattan_expert_30k_diverse_correct_v1` 的主程序。因此，不能把仓库中的某个 Python 文件误认为是这 30K 数据集的完整生成器。数据集元数据明确记录的生成器是 `multifidelity-linear-asf-v1`，但该批量生成脚本位于本仓库之外、尚未被提供。`expert_mask_quality_lab_20260829/direct_linear_gumbel_experiment.py` 只是单样本/小规模的线性 ASF + Gumbel 优化实验，不能独立重建 30K 数据集。若要让专家完整审查“数据生成 → 训练”的全部链路，还需要补充当时实际运行的批量生成主脚本。
 
 ## 主要文件
 
@@ -26,6 +26,28 @@
 - `optical_visual_quality.py`：光场质量、连续性和辅助指标函数。
 - `expert_mask_quality_lab_20260829/direct_linear_gumbel_experiment.py`：专家掩码的直接线性 ASF/Gumbel 优化实验。
 - `real_circuit_manhattan_expert_30k_diverse_correct_v1/metadata.json`：数据集格式、分辨率和物理口径说明；实际 NPZ 数据被 `.gitignore` 排除。
+- `real_circuit_manhattan_expert_30k_diverse_correct_v1/generation_config.json`：该数据集的生成参数记录，不是生成程序本身。
+
+## 30K 数据集的已知生成口径
+
+从数据集的 `generation_config.json` 和 `metadata.json` 可以确定：
+
+```text
+generator version       multifidelity-linear-asf-v1
+source data directory   target_source_manhattan_diverse_30k_v1
+mask / target           512×512 / 192×192
+proxy propagation       inter=6
+reference propagation   inter=10
+continuous steps        250
+binary steps            250
+candidate count         16
+quality attempts        3
+direct polish           200 steps on failure
+acceptance              fixed binary mask evaluated by reference inter=10 ASF
+minimum NCC             0.92
+```
+
+因此，数据生成阶段的物理流程是“连续代理优化（inter=6）→ 硬 Gumbel 候选搜索 → 最终 inter=10 线性 ASF 验收”，而当前模型训练阶段使用的是 `训练扩散专家掩码模型.py`，训练/验证均为 `inter=10`。两者不是同一个程序。
 
 ## 当前有效训练口径
 
