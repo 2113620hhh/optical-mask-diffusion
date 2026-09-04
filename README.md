@@ -6,7 +6,7 @@
 
 仓库只保留当前有效的训练、网络、光学传播、数据读取和专家掩码优化代码。训练数据、模型 checkpoint、训练日志和集群临时文件不纳入 Git，因为它们体积很大且可能包含机器路径或实验隐私。
 
-重要说明：当前仓库中没有实际批量生成 `real_circuit_manhattan_expert_30k_diverse_correct_v1` 的主程序。因此，不能把仓库中的某个 Python 文件误认为是这 30K 数据集的完整生成器。数据集元数据明确记录的生成器是 `multifidelity-linear-asf-v1`，但该批量生成脚本位于本仓库之外、尚未被提供。`expert_mask_quality_lab_20260829/direct_linear_gumbel_experiment.py` 只是单样本/小规模的线性 ASF + Gumbel 优化实验，不能独立重建 30K 数据集。若要让专家完整审查“数据生成 → 训练”的全部链路，还需要补充当时实际运行的批量生成主脚本。
+重要说明：当前仓库中没有实际批量生成 `real_circuit_manhattan_expert_30k_diverse_correct_v1` 的主程序。因此，不能把仓库中的某个 Python 文件误认为是这 30K 数据集的完整生成器。数据集元数据明确记录的生成器是 `multifidelity-linear-asf-v1`，但该批量生成脚本位于本仓库之外、尚未被提供。`expert_mask_quality_lab_20260829/direct_linear_gumbel_experiment.py` 只是单样本/小规模的线性 ASF + Gumbel 优化实验，不能独立重建 30K 数据集。若要让专家完整审查“数据生成 → 训练”的全部链路，还需要补充当时实际运行的批量生成主脚本及其调用的输入预处理脚本。
 
 ## 主要文件
 
@@ -48,6 +48,47 @@ minimum NCC             0.92
 ```
 
 因此，数据生成阶段的物理流程是“连续代理优化（inter=6）→ 硬 Gumbel 候选搜索 → 最终 inter=10 线性 ASF 验收”，而当前模型训练阶段使用的是 `训练扩散专家掩码模型.py`，训练/验证均为 `inter=10`。两者不是同一个程序。
+
+## 文件调用关系（请专家重点核对）
+
+### A. 训练数据生成阶段
+
+现有证据能够确认的调用关系如下：
+
+```text
+外部的 30K 批量生成主程序（当前仓库缺失）
+    ├─ 读取 target_source_manhattan_diverse_30k_v1
+    ├─ 调用 multifidelity-linear-asf-v1 的连续代理优化（proxy inter=6）
+    ├─ 调用硬 Gumbel 候选搜索（16 candidates）
+    ├─ 调用线性 ASF 参考验收（reference inter=10）
+    └─ 写出 train/val/test/*.npz 和 metadata.json
+
+仓库中可见的对应实验实现：
+expert_mask_quality_lab_20260829/direct_linear_gumbel_experiment.py
+    └─ 直接 import 光学FFT前向传播_小分辨率.py
+        └─ 使用 SmallFFTForwardPlan / cosine_score_image
+```
+
+注意：上面第一行“外部的 30K 批量生成主程序”不是仓库中的文件，所以无法仅凭本仓库证明它当时具体 import 了哪些 Python 模块。`generation_config.json` 只能证明算法版本和参数，不能证明源代码调用链。`direct_linear_gumbel_experiment.py` 是目前仓库里唯一可见的同类专家优化实验代码，它不能被当作 30K 批量生成器。
+
+### B. 模型训练阶段（仓库内可复现）
+
+```text
+resume_manhattan30k_score_only_40gpu.slurm
+    └─ 调用 resume_mfhq120k_score_focus_40gpu.slurm
+        └─ 启动 训练扩散专家掩码模型_修正角谱版.py
+            └─ import 训练扩散专家掩码模型.py
+                ├─ import 扩散专家掩码模型.py
+                │   └─ 构建 ExpertMaskDiffusionUNet
+                ├─ import 光学FFT前向传播_小分辨率.py
+                │   └─ 执行训练/验证线性 ASF FFT
+                ├─ import 小分辨率轨迹数据集.py
+                │   └─ 提供部分 NPZ 数据读取工具
+                └─ import optical_visual_quality.py
+                    └─ 提供光场质量和辅助指标函数
+```
+
+训练代码读取的是已经生成好的 `train/val/test/*.npz`，不会调用专家掩码生成器，也不会重新生成训练数据。
 
 ## 当前有效训练口径
 
