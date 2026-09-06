@@ -1,170 +1,65 @@
 # Optical Mask Diffusion
 
-这是一个“目标光场 → 一次前向生成 512×512 掩码 → 线性有限孔径 ASF/FFT 传播”的研究代码仓库，用于逆光刻/计算全息类光学掩码生成实验。
+这是用于逆光刻/计算光学实验的研究代码仓库。仓库只保留当前有效的专家掩码生成、模型网络、模型训练和必要依赖代码。
 
-## 仓库范围
+## 1. 专家掩码生成（当前生产链路）
 
-仓库只保留当前有效的训练、网络、光学传播、数据读取和专家掩码优化代码。训练数据、模型 checkpoint、训练日志和集群临时文件不纳入 Git，因为它们体积很大且可能包含机器路径或实验隐私。
+当前生成训练数据的主程序是 `生成多保真高质量专家掩码数据集.py`，不是训练脚本，也不是评估脚本。
 
-重要说明：当前仓库中没有实际批量生成 `real_circuit_manhattan_expert_30k_diverse_correct_v1` 的主程序。因此，不能把仓库中的某个 Python 文件误认为是这 30K 数据集的完整生成器。数据集元数据明确记录的生成器是 `multifidelity-linear-asf-v1`，但该批量生成脚本位于本仓库之外、尚未被提供。`expert_mask_quality_lab_20260829/direct_linear_gumbel_experiment.py` 只是单样本/小规模的线性 ASF + Gumbel 优化实验，不能独立重建 30K 数据集。若要让专家完整审查“数据生成 → 训练”的全部链路，还需要补充当时实际运行的批量生成主脚本及其调用的输入预处理脚本。
+启动脚本是 `generate_lithosim_asf10_400_40gpu.slurm`。它在 5 个节点上各启动 1 个 torchrun launcher，每个 launcher 启动 8 个进程，总共 40 个 rank；rank 进程通过 `run_lithosim_generator_rank.sh` 调用主程序，并使用 `cuda:$LOCAL_RANK`。
 
-## 主要文件
+主程序的实际 Python 调用链是：
 
-### 模型与训练
+`生成多保真高质量专家掩码数据集.py`
+→ `expert_mask_quality_lab_20260829/direct_linear_gumbel_experiment.py`（DirectLinearASFPlan、ncc、normalize_mean）
+→ `expert_mask_quality_lab_20260829/fast_multifidelity_hybrid.py`（exponential_value、remember_candidate）
+→ `光学FFT前向传播_小分辨率.py`（SmallFFTForwardPlan 和光学评分）
+→ `生成多精度正确专家掩码数据集.py`（源 shard 读取、完整性校验、原子写入、旋转输出）。
 
-- `训练扩散专家掩码模型.py`：实际训练实现、数据集类、损失函数、验证和 checkpoint 保存。
-- `训练扩散专家掩码模型_修正角谱版.py`：当前训练入口，调用上面的 `main()`。
-- `扩散专家掩码模型.py`：扩散 U-Net、Fourier 特征和模型构建函数。
-- `resume_mfhq120k_score_focus_40gpu.slurm`：5 节点 × 8 卡的通用分布式启动器。
-- `resume_manhattan30k_score_only_40gpu.slurm`：当前 30K 数据集 score 微调启动脚本。
-- `runs/.../train_config.json`（不默认提交）：某次运行实际保存的完整参数快照。
+因此，完整的数据生成链路由上述 5 个 Python/ shell 文件共同组成。`generation_config.json` 只记录参数，不是生成程序。
 
-### 光学与数据
+### 核心主程序：`生成多保真高质量专家掩码数据集.py`
 
-- `光学FFT前向传播_小分辨率.py`：有限支撑线性 ASF/FFT 前向传播和 `FFTPlanCache`。
-- `小分辨率轨迹数据集.py`：NPZ 数据读取工具（部分旧实验使用）。
-- `optical_visual_quality.py`：光场质量、连续性和辅助指标函数。
-- `expert_mask_quality_lab_20260829/direct_linear_gumbel_experiment.py`：专家掩码的直接线性 ASF/Gumbel 优化实验。
-- `real_circuit_manhattan_expert_30k_diverse_correct_v1/metadata.json`：数据集格式、分辨率和物理口径说明；实际 NPZ 数据被 `.gitignore` 排除。
-- `real_circuit_manhattan_expert_30k_diverse_correct_v1/generation_config.json`：该数据集的生成参数记录，不是生成程序本身。
+这个文件负责真正完成“逐个 target 优化专家掩码并写出训练 shard”的全部生产逻辑，作用不是简单封装调用。主要步骤如下：
 
-## 30K 数据集的已知生成口径
+1. 读取输入目录中 `train`、`val`、`test` 的原始 NPZ shard，并按 `native_shard_index % world_size` 分配给 40 个 rank。
+2. 为每个 GPU 建立一个 proxy 光学传播计划和一个 reference 线性 ASF 传播计划。
+3. 对每个 target 创建 `512×512` 的随机 latent，经过 sigmoid 得到连续概率掩码，用 Adam 最大化 proxy 光场与 target 的 NCC。
+4. 将连续概率转换为二分类 logits，使用 hard Gumbel-Softmax 继续优化二值掩码；每隔固定步数保存随机候选和确定性硬阈值候选。
+5. 将候选掩码全部送入 reference ASF `inter=10` 前向传播，以最终固定二值掩码 NCC 重新排序，选择得分最高者。
+6. 把选中的 `expert_mask`、`expert_pred`、`score`、高频/梯度 score、`mask_mean` 等字段写入输出 NPZ；完成后删除对应 partial 文件。
+7. 每 4 个样本原子保存一次 partial 状态；任务中断后会跳过完整 shard，并从 partial 状态继续，不改写输入数据。
 
-从数据集的 `generation_config.json` 和 `metadata.json` 可以确定：
+该文件的 `worker()` 函数负责分布式样本生成，`optimize_sample()` 负责单样本优化，`optimize_attempt()` 负责连续阶段、Gumbel 阶段和 reference 评价，`finalize()` 负责检查全部 shard 并生成最终 metadata。任何生成失败都会在 `failures/` 写入错误记录后终止对应 rank，不会删除已经完成的数据。
 
-```text
-generator version       multifidelity-linear-asf-v1
-source data directory   target_source_manhattan_diverse_30k_v1
-mask / target           512×512 / 192×192
-proxy propagation       inter=6
-reference propagation   inter=10
-continuous steps        250
-binary steps            250
-candidate count         16
-quality attempts        3
-direct polish           200 steps on failure
-acceptance              fixed binary mask evaluated by reference inter=10 ASF
-minimum NCC             0.92
-```
+当前生产参数：mask/target 为 512×512/192×192；proxy ASF inter=10；reference ASF inter=10；连续优化 200 步；二值 Gumbel 优化 200 步；两个学习率均为 0.1；tau 从 1.0 退火到 0.08；候选数 32；min-ncc=0；field-threshold=0.57；foreground-threshold=0.05。
 
-因此，数据生成阶段的物理流程是“连续代理优化（inter=6）→ 硬 Gumbel 候选搜索 → 最终 inter=10 线性 ASF 验收”，而当前模型训练阶段使用的是 `训练扩散专家掩码模型.py`，训练/验证均为 `inter=10`。两者不是同一个程序。
+生成器读取 `lithosim_all_targets_192_npz`，写入 `lithosim_all_targets_192_npz_asf10_expert_steps400_40gpu`。完整 shard 会跳过，`partials/` 用于断点续跑，输入数据集只读。
 
-## 文件调用关系（请专家重点核对）
+## 2. 模型网络与训练（当前有效链路）
 
-### A. 训练数据生成阶段
+训练入口是 `训练扩散专家掩码模型_修正角谱版.py`，它调用 `训练扩散专家掩码模型.py`。
 
-现有证据能够确认的调用关系如下：
+训练实现的依赖链：`训练扩散专家掩码模型.py` → `扩散专家掩码模型.py`（ExpertMaskDiffusionUNet）→ `光学FFT前向传播_小分辨率.py`（线性 ASF/FFT）→ `小分辨率轨迹数据集.py`（NPZ 读取工具）→ `optical_visual_quality.py`（质量指标）。
 
-```text
-外部的 30K 批量生成主程序（当前仓库缺失）
-    ├─ 读取 target_source_manhattan_diverse_30k_v1
-    ├─ 调用 multifidelity-linear-asf-v1 的连续代理优化（proxy inter=6）
-    ├─ 调用硬 Gumbel 候选搜索（16 candidates）
-    ├─ 调用线性 ASF 参考验收（reference inter=10）
-    └─ 写出 train/val/test/*.npz 和 metadata.json
+40 卡续训通过 `resume_manhattan30k_score_only_40gpu.slurm` 调用 `resume_mfhq120k_score_focus_40gpu.slurm`，再由 torchrun 启动上述训练入口。
 
-仓库中可见的对应实验实现：
-expert_mask_quality_lab_20260829/direct_linear_gumbel_experiment.py
-    └─ 直接 import 光学FFT前向传播_小分辨率.py
-        └─ 使用 SmallFFTForwardPlan / cosine_score_image
-```
+训练程序只读取已生成的 `train/val/test/*.npz`，不会调用专家掩码生成器，也不会重新生成数据。
 
-注意：上面第一行“外部的 30K 批量生成主程序”不是仓库中的文件，所以无法仅凭本仓库证明它当时具体 import 了哪些 Python 模块。`generation_config.json` 只能证明算法版本和参数，不能证明源代码调用链。`direct_linear_gumbel_experiment.py` 是目前仓库里唯一可见的同类专家优化实验代码，它不能被当作 30K 批量生成器。
+## 3. 当前训练参数
 
-### B. 模型训练阶段（仓库内可复现）
+完整快照是 `runs/manhattan30k_score_only_linear_asf10_lr2.5e-6_epoch200/train_config.json`。当前关键设置为：mask/target=512×512/192×192，训练/验证 inter=10/10，初始学习率=2.5e-6，总 epoch=200，`score_plateau`（patience=2、factor=0.5、minimum lr=3e-7），best metric=`cosine_score`。denoise/BCE/mask-mean 权重为 0.025/0.10/0.10，physical cosine 权重为 1.20，二值打印/Dice 损失全部为 0。
 
-```text
-resume_manhattan30k_score_only_40gpu.slurm
-    └─ 调用 resume_mfhq120k_score_focus_40gpu.slurm
-        └─ 启动 训练扩散专家掩码模型_修正角谱版.py
-            └─ import 训练扩散专家掩码模型.py
-                ├─ import 扩散专家掩码模型.py
-                │   └─ 构建 ExpertMaskDiffusionUNet
-                ├─ import 光学FFT前向传播_小分辨率.py
-                │   └─ 执行训练/验证线性 ASF FFT
-                ├─ import 小分辨率轨迹数据集.py
-                │   └─ 提供部分 NPZ 数据读取工具
-                └─ import optical_visual_quality.py
-                    └─ 提供光场质量和辅助指标函数
-```
+## 4. 仓库文件
 
-训练代码读取的是已经生成好的 `train/val/test/*.npz`，不会调用专家掩码生成器，也不会重新生成训练数据。
+专家掩码生成：`生成多保真高质量专家掩码数据集.py`、`生成多精度正确专家掩码数据集.py`、`run_lithosim_generator_rank.sh`、`generate_lithosim_asf10_400_40gpu.slurm`、`expert_mask_quality_lab_20260829/direct_linear_gumbel_experiment.py`、`expert_mask_quality_lab_20260829/fast_multifidelity_hybrid.py`。
 
-## 当前有效训练口径
+模型训练：`训练扩散专家掩码模型.py`、`训练扩散专家掩码模型_修正角谱版.py`、`扩散专家掩码模型.py`、`光学FFT前向传播_小分辨率.py`、`小分辨率轨迹数据集.py`、`optical_visual_quality.py`。
 
-当前 score 微调实验的关键设置如下：
+训练启动和参数：`resume_manhattan30k_score_only_40gpu.slurm`、`resume_mfhq120k_score_focus_40gpu.slurm`、`runs/.../train_config.json`。
 
-```text
-mask resolution       512×512
-target resolution     192×192
-training FFT inter    10
-validation FFT inter  10
-train stage           direct
-prediction type       x0
-initial learning rate 2.5e-6
-total epochs          200
-LR scheduler          score_plateau
-plateau patience      2 epochs
-plateau factor        0.5
-plateau threshold     0.001
-minimum learning rate 3e-7
-best metric           cosine_score
-```
+数据 NPZ、checkpoint、日志和临时缓存由 `.gitignore` 排除；数据格式和生成参数快照保留在 `lithosim_all_targets_192_npz/metadata.json` 与 `lithosim_all_targets_192_npz_asf10_expert_steps400_40gpu/generation_config.json`。
 
-非二值项保留：
+## 5. 环境
 
-```text
-denoise_weight        0.025
-bce_weight            0.10
-mask_mean_weight      0.10
-physical_weight       1.0
-physical_cosine       1.20
-physical_l1           0.25
-highpass_cosine       0.30
-highpass_l1           0.15
-gradient_cosine       0.20
-```
-
-本轮争议性的二值打印/Dice损失全部关闭：`binary_print_loss_weight` 及其 Dice、FP、FN、背景尾部、连续性和 endpoint 子项均为 `0`。训练日志中的 `score` 是光场与目标光场的余弦相似度实现，不是 NCC 代码中的另一套指标名称；二者在非负光场归一化场景下数值形式相同。
-
-## 数据格式
-
-数据集目录需要包含：
-
-```text
-dataset/
-├── metadata.json
-├── train/*.npz
-├── val/*.npz
-└── test/*.npz
-```
-
-每个 NPZ shard 至少应提供训练代码所需的 `target`、`expert_mask`、`optics` 等数组。`metadata.json` 应声明 `mask_resolution=512`、`target_resolution=192`，以及与训练一致的线性 ASF 前向模型。
-
-## 训练示例
-
-先准备与脚本中一致的 Conda/PyTorch/ROCm 环境，并确认数据集与 checkpoint 路径。当前 40 卡微调：
-
-```bash
-cd /path/to/optical-mask-diffusion
-sbatch resume_manhattan30k_score_only_40gpu.slurm
-```
-
-脚本默认从：
-
-```text
-runs/manhattan30k_field_print_linear_asf10_40gpu_lr5e-6_v2/checkpoints/latest.pt
-```
-
-恢复，并将新 checkpoint 写入另一个输出目录；请按实际部署环境修改 `DATASET_DIR`、`BASE_CHECKPOINT` 和 `OUT_DIR`，不要覆盖基础模型。
-
-## 评估
-
-评估脚本不是训练必需依赖。若需要复现实验，可使用仓库中的 `eval_*.py` 和对应 Slurm 脚本；评估任务只读取 checkpoint，不应写入训练输出目录。
-
-## 可复现性与限制
-
-1. 光学结果依赖 PyTorch、ROCm/FFT 后端、设备精度（当前训练使用 BF16）和 `inter_num`。
-2. 训练与验证必须使用同一物理口径；当前均为 `inter=10`。
-3. checkpoint 和原始数据不随代码发布，专家需要代码审查时应使用与 `metadata.json` 匹配的数据或脱敏小样本。
-4. 中文文件名是项目现有接口的一部分，请勿在不修改所有 import/启动脚本的情况下单独改名。
+Python 3.10、PyTorch 2.5.1、ROCm/DTK 25.04.2、numpy、scipy、Pillow。光学结果依赖 FFT 后端、设备精度和 `inter_num`；生成、训练和验证当前均使用 ASF `inter=10`。
